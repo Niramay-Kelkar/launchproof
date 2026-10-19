@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{{ offer }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 60px auto; padding: 0 20px; color: #1a1a1a; }
+    .badge { display:inline-block; background:#fff3cd; color:#7a5b00; padding:4px 10px; border-radius:6px; font-size:12px; margin-bottom: 16px; }
+    h1 { font-size: 28px; }
+    .cta { display:inline-block; margin-top: 24px; padding: 12px 24px; background:#111; color:#fff; border-radius:8px; text-decoration:none; }
+    .fine { color:#777; font-size: 13px; margin-top: 40px; }
+  </style>
+</head>
+<body>
+  <div class="badge">{% if mode == 'preview' %}PREVIEW &mdash; not public, not counted as demand{% else %}Experiment v{{ experiment_version }} &mdash; approved content only{% endif %}</div>
+  <h1>{{ offer }}</h1>
+  <p>{{ hypothesis }}</p>
+  <a class="cta" href="#" id="cta-button">{{ cta }}</a>
+  <p class="fine">This page is part of a controlled validation experiment. No claims here imply an existing product, and no personal data is collected without consent.</p>
+
+  <script>
+    // source_class is set server-side from the ?mode= the page was requested with:
+    // preview -> 'qa', live -> 'participant'. Never hardcode this client-side.
+    const SOURCE_CLASS = '{{ event_source_class }}';
+
+    fetch('/runs/{{ run_id }}/events', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        experiment_version: {{ experiment_version }},
+        event_type: 'page_view',
+        source_class: SOURCE_CLASS
+      })
+    });
+
+    document.getElementById('cta-button').addEventListener('click', function (e) {
+      e.preventDefault();
+      fetch('/runs/{{ run_id }}/events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          experiment_version: {{ experiment_version }},
+          event_type: 'cta_click',
+          source_class: SOURCE_CLASS
+        })
+      }).then(function () { alert('Thanks — recorded.'); });
+    });
+  </script>
+</body>
+</html>

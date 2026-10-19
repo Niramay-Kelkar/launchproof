@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local secrets / environment
+.env
+*.env.local
+
+# Local SQLite data (not source)
+*.db
+*.sqlite
+*.sqlite3
+
+# LangGraph durable checkpoints / usage ledgers (local run state, not source)
+launchproof_data/
+
+# OS cruft
+.DS_Store

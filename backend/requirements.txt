@@ -1,0 +1,25 @@
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+sqlalchemy==2.0.36
+pydantic==2.12.3
+jinja2==3.1.4
+python-multipart==0.0.12
+
+# main.py uses this directly to set a default SSL_CERT_FILE at startup
+# (fixes a known python.org macOS installer issue with an empty CA store).
+# Declared explicitly, not left as an implicit transitive dep of httpx.
+certifi
+
+# launchproof graph package (merged into ./launchproof), demo-mode deps.
+# httpx is also used directly by glasser_client.py (research_adapter.py's
+# Glasser integration) -- no separate dependency needed for that.
+langgraph==1.2.16
+langgraph-checkpoint-sqlite==3.1.2
+httpx>=0.28,<1
+beautifulsoup4>=4.13,<5
+
+# only needed if you run the graph in mode="live" (uses OpenAI via langchain)
+# langchain-openai>=1.1,<2
+
+# dev/test only -- runs tests/ (backend) and the merged launchproof package's own suite
+pytest>=8,<10

@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>LaunchProof</title>
+<style>
+:root{--bg:#eef1f3;--surf:#fff;--ink:#14262b;--mute:#5b6b70;--line:#d3dadd;--acc:#0f5c5c;--acc-t:#dcefed;--warn:#a85f00;--warn-t:#fbeccf;--bad:#a3262a;--bad-t:#f8dedf;--ok:#1d6b3a;--ok-t:#dcf1e2;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0e1517;--surf:#162125;--ink:#e6eef0;--mute:#93a5aa;--line:#2b3b40;--acc:#5fc2bd;--acc-t:#173a3a;--warn:#f0b04c;--warn-t:#3d2d10;--bad:#f08a8d;--bad-t:#3d1a1b;--ok:#6fd392;--ok-t:#163826;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0e1517;--surf:#162125;--ink:#e6eef0;--mute:#93a5aa;--line:#2b3b40;--acc:#5fc2bd;--acc-t:#173a3a;--warn:#f0b04c;--warn-t:#3d2d10;--bad:#f08a8d;--bad-t:#3d1a1b;--ok:#6fd392;--ok-t:#163826;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+h1,h2,h3{font-family:"Iowan Old Style","Palatino Linotype",Georgia,serif;font-weight:600;margin:0 0 .4em;line-height:1.2}
+h2{font-size:1.5rem}h3{font-size:1.05rem}
+p{margin:.3em 0 .8em;max-width:68ch}
+.app{display:grid;grid-template-columns:250px 1fr;min-height:100vh}
+aside{border-right:1px solid var(--line);padding:18px 16px;background:var(--surf);position:sticky;top:0;align-self:start;height:100vh;overflow:auto}
+.logo{font-family:Georgia,serif;font-size:1.25rem;font-weight:700;margin-bottom:2px}
+.sub{color:var(--mute);font-size:.8rem;margin-bottom:14px}
+nav button{display:flex;width:100%;gap:8px;align-items:center;text-align:left;background:none;border:0;border-left:3px solid var(--line);color:var(--mute);padding:8px 10px;font:inherit;cursor:pointer;border-radius:0 6px 6px 0}
+nav button[aria-current=true]{border-left-color:var(--acc);color:var(--ink);background:var(--acc-t);font-weight:600}
+nav button:disabled{opacity:.4;cursor:not-allowed}
+nav button:focus-visible,.btn:focus-visible,select:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+nav .st{margin-left:auto;font-size:.7rem;color:var(--mute)}
+.agent{font-size:.8rem;border-top:1px solid var(--line);padding:8px 0}
+.agent b{display:block}
+.agent span{color:var(--mute)}
+main{padding:24px clamp(16px,4vw,44px);max-width:1040px;width:100%}
+.banner{background:var(--warn-t);color:var(--warn);border:1px solid var(--warn);border-radius:8px;padding:8px 12px;font-size:.85rem;margin-bottom:18px}
+.banner.err{background:var(--bad-t);color:var(--bad);border-color:var(--bad)}
+.card{background:var(--surf);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+.btn{background:var(--acc);color:var(--surf);border:0;border-radius:8px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}
+.btn.sec{background:none;color:var(--ink);border:1px solid var(--line)}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+label{display:block;font-size:.85rem;font-weight:600;margin:10px 0 4px}
+input,textarea,select{width:100%;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+textarea{min-height:76px}
+.tag{display:inline-block;font-size:.72rem;font-weight:600;padding:1px 8px;border-radius:99px;border:1px solid currentColor}
+.t-ok{color:var(--ok);background:var(--ok-t)}.t-warn{color:var(--warn);background:var(--warn-t)}.t-bad{color:var(--bad);background:var(--bad-t)}.t-acc{color:var(--acc);background:var(--acc-t)}.t-mute{color:var(--mute)}
+.ev{border-left:3px solid var(--acc);padding:6px 10px;margin:8px 0;background:var(--bg);border-radius:0 8px 8px 0;font-size:.88rem}
+.ev small,.mute{color:var(--mute)}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.86rem}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+.chip{border:1px solid var(--line);background:var(--surf);color:var(--ink);border-radius:8px;padding:7px 12px;cursor:pointer;font:inherit;font-size:.86rem}
+.chip[aria-pressed=true]{border-color:var(--acc);background:var(--acc-t);font-weight:600}
+.chip:disabled{opacity:.4;cursor:not-allowed}
+.frame{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff}
+.frame .bar{background:#e4e8ea;padding:6px 10px;font-size:.75rem;color:#5b6b70;display:flex;justify-content:space-between}
+.frame iframe{width:100%;height:420px;border:0;display:block}
+.disc{font-size:.72rem;color:#5b6b70;margin-top:14px}
+.big{font-family:Georgia,serif;font-size:2.4rem;line-height:1}
+.ledger{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:12px}
+.ledger div{border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--surf)}
+.ledger .p{border-color:var(--acc);background:var(--acc-t)}
+@media (max-width:760px){.app{grid-template-columns:1fr}aside{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}.agents{display:none}.ledger{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:no-preference){.fade{animation:f .25s ease}@keyframes f{from{opacity:.3}to{opacity:1}}}
+</style>
+</head>
+<body>
+<div class="app">
+<aside>
+  <div class="logo">LaunchProof</div>
+  <div class="sub" id="runLabel">No run yet</div>
+  <nav id="nav" aria-label="Run stages"></nav>
+  <div class="agents">
+    <p class="mute" style="font-size:.75rem;margin:14px 0 4px">Bounded agents</p>
+    <div class="agent"><b>Opportunity researcher</b><span>read-only research</span></div>
+    <div class="agent"><b>Experiment designer</b><span>no publish, no spend</span></div>
+    <div class="agent"><b>Asset builder</b><span>isolated workspace</span></div>
+    <div class="agent"><b>QA &amp; safety reviewer</b><span>preview/test tools only</span></div>
+    <div class="agent"><b>Experiment operator</b><span>approved actions only</span></div>
+    <div class="agent"><b>Evidence analyst</b><span>read-only evidence</span></div>
+  </div>
+</aside>
+<main id="main"></main>
+</div>
+<script>
+/* ---------- API base ----------
+   Served from the FastAPI app itself (mounted at /app), so these
+   are same-origin root-relative calls. If you run the frontend from
+   a different origin during dev, set API_BASE accordingly. */
+const API_BASE = "";
+
+const STAGES = ["Idea intake","Opportunity brief","Experiment plan","Landing page","Founder approval","Execution trail","Decision memo"];
+
+const S = {
+  stage: 0,
+  runId: null,
+  runStatus: null,
+  idea: { idea_text: "A weekly meal planner for people who work rotating shifts.", audience: "Nurses and warehouse staff on rotating shifts", constraints: "Budget $0, 1 week, no paid ads" },
+  evidence: [],
+  spec: { audience:"", riskiest_assumption:"", hypothesis:"", offer:"", cta:"", primary_metric:"", success_threshold:"", stop_rule:"", duration:"", risks:"" },
+  experimentId: null,
+  experimentVersion: null,
+  approved: false,
+  approvedVersion: null,
+  events: [],
+  report: null,
+  error: null,
+  loading: false,
+};
+
+const $ = s => document.querySelector(s);
+
+async function api(path, opts) {
+  S.error = null;
+  try {
+    const res = await fetch(API_BASE + path, Object.assign({ headers: { "Content-Type": "application/json" } }, opts));
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.detail || (res.status + " " + res.statusText));
+    }
+    return data;
+  } catch (e) {
+    S.error = e.message || String(e);
+    throw e;
+  }
+}
+
+function nav() {
+  $("#nav").innerHTML = STAGES.map((s, i) => {
+    const reachable = i === 0 || S.runId; // everything past stage 0 needs a run_id
+    return `<button data-i="${i}" ${i===S.stage?'aria-current="true"':''} ${reachable?'':'disabled'}>${s}<span class="st">${i<S.stage?"done":(i===4&&S.approved?"approved":"")}</span></button>`;
+  }).join("");
+  document.querySelectorAll("#nav button").forEach(b => b.onclick = () => go(+b.dataset.i));
+  $("#runLabel").textContent = S.runId ? ("Run " + S.runId + (S.runStatus ? " · " + S.runStatus : "")) : "No run yet";
+}
+
+function bar(prevI, nextI, nextLabel) {
+  return `<div style="display:flex;gap:10px;margin-top:14px">
+    ${prevI !== null ? `<button class="btn sec" onclick="go(${prevI})">Back</button>` : ""}
+    ${nextI !== null ? `<button class="btn" id="continueBtn" onclick="go(${nextI})">${nextLabel || "Continue"}</button>` : ""}
+  </div>`;
+}
+// Fetch-on-entry happens HERE, once per navigation -- never inside render(),
+// which runs on every state change and would otherwise refetch in a loop.
+function go(i) {
+  S.stage = i;
+  window.scrollTo(0, 0);
+  if (i === 5 && S.runId) { loadEvents(); return; }
+  render();
+}
+
+function errBanner() {
+  return S.error ? `<div class="banner err">${S.error}</div>` : "";
+}
+
+/* ---------- stage views ---------- */
+
+const V = {
+
+  // 0: Idea intake -> POST /runs
+  0() {
+    return `<h2>Describe the idea</h2>
+    <p>LaunchProof turns it into a test you can run. It never promises that a test proves demand.</p>
+    ${errBanner()}
+    <div class="card">
+      <label for="i1">Idea</label><textarea id="i1">${S.idea.idea_text}</textarea>
+      <div class="grid">
+        <div><label for="i2">Target audience</label><input id="i2" value="${S.idea.audience}"></div>
+        <div><label for="i3">Constraints</label><input id="i3" value="${S.idea.constraints}"></div>
+      </div>
+    </div>
+    <div class="card"><h3>What gets created</h3><p class="mute">A real run is created on submit. Opportunity brief, experiment plan, a landing page from a fixed template, an approval gate, an execution trail, and a decision memo — all backed by the live API, not sample data.</p></div>
+    <div style="display:flex;gap:10px;margin-top:14px"><button class="btn" id="continueBtn" onclick="submitIdea()">${S.loading ? "Creating run…" : "Create run & research"}</button></div>`;
+  },
+
+  // 1: Opportunity brief -> GET /runs/{id}/evidence (already triggered on submitIdea)
+  1() {
+    const facts = S.evidence.filter(e => e.source_url);
+    const unsourced = S.evidence.filter(e => !e.source_url);
+    return `<h2>Opportunity brief</h2>
+    <p>Every claim links to a source and a retrieval time. Where we have nothing, it says so — this list is live from <code>/runs/${S.runId}/evidence</code>.</p>
+    ${errBanner()}
+    <div class="grid">
+      <div class="card"><h3>Sourced facts</h3>${facts.length ? facts.map(evCard).join("") : '<span class="tag t-warn">no evidence</span> <span class="mute">No sourced claims were found for this idea.</span>'}</div>
+      <div class="card"><h3>Unsourced / inference</h3>${unsourced.length ? unsourced.map(evCard).join("") : '<span class="mute">None.</span>'}</div>
+    </div>
+    <div class="card"><h3>Not found</h3><span class="tag t-warn">no evidence</span> <span class="mute">No source on willingness to pay or market size. These stay blank, not estimated.</span></div>
+    ${bar(0, 2)}`;
+  },
+
+  // 2: Experiment plan -> POST /runs/{id}/experiment
+  2() {
+    const sp = S.spec;
+    return `<h2>Experiment plan</h2>
+    ${S.experimentId ? `<span class="tag t-acc">spec v${S.experimentVersion}</span> <span class="mute">Submitting again creates a new version and clears approval.</span>` : '<span class="tag t-mute">not yet submitted</span>'}
+    ${errBanner()}
+    <div class="card" style="margin-top:12px">
+      <label>Audience</label><input id="e_audience" value="${sp.audience || S.idea.audience}">
+      <label>Riskiest assumption</label><input id="e_risk" value="${sp.riskiest_assumption || "Shift workers will hand over an email for a plan tied to their schedule."}">
+      <label>Hypothesis</label><input id="e_hyp" value="${sp.hypothesis || "At least 10% of relevant visitors sign up within 7 days."}">
+      <div class="grid">
+        <div><label>Offer</label><input id="e_offer" value="${sp.offer || "Meal plans that follow your shifts"}"></div>
+        <div><label>CTA</label><input id="e_cta" value="${sp.cta || "Join the waitlist"}"></div>
+      </div>
+      <div class="grid">
+        <div><label>Primary metric</label><input id="e_metric" value="${sp.primary_metric || "Signup rate, participant events only"}"></div>
+        <div><label>Success threshold</label><input id="e_threshold" value="${sp.success_threshold || "10%+ of visitors"}"></div>
+      </div>
+      <div class="grid">
+        <div><label>Stop rule (optional)</label><input id="e_stop" value="${sp.stop_rule || ""}"></div>
+        <div><label>Duration (optional)</label><input id="e_duration" value="${sp.duration || "7 days"}"></div>
+      </div>
+      <label>Risks (optional)</label><input id="e_risks" value="${sp.risks || ""}">
+    </div>
+    <div style="display:flex;gap:10px;margin-top:14px">
+      <button class="btn sec" onclick="go(1)">Back</button>
+      <button class="btn" id="continueBtn" onclick="submitExperiment()">${S.loading ? "Submitting…" : "Submit experiment spec"}</button>
+    </div>`;
+  },
+
+  // 3: Landing page -> real iframe preview via GET /runs/{id}/landing?mode=preview
+  3() {
+    if (!S.experimentId) return `<h2>Landing page</h2><div class="card"><span class="tag t-warn">waiting</span> Submit the experiment spec first.</div>${bar(2, null)}`;
+    const previewUrl = `/runs/${S.runId}/landing?mode=preview`;
+    return `<h2>Landing page</h2>
+    <p>Rendered live by the backend from the approved template (no arbitrary generated code). This is a labeled preview — its events are tagged <span class="tag t-mute">qa</span>, never counted as demand.</p>
+    <div class="chips" role="group" aria-label="Template">
+      <button class="chip" aria-pressed="true">Waitlist (wired)</button>
+      <button class="chip" disabled title="Not wired for this demo">Pre-order</button>
+      <button class="chip" disabled title="Not wired for this demo">Concierge pilot</button>
+    </div>
+    <div class="frame fade"><div class="bar"><span>${previewUrl}</span><span>PREVIEW</span></div><iframe src="${previewUrl}"></iframe></div>
+    ${bar(2, 4)}`;
+  },
+
+  // 4: Founder approval -> GET approval-expected-hash, POST /runs/{id}/approve
+  4() {
+    if (!S.experimentId) return `<h2>Founder approval</h2><div class="card"><span class="tag t-warn">waiting</span> Submit the experiment spec first.</div>${bar(3, null)}`;
+    const stale = S.approved && S.approvedVersion !== S.experimentVersion;
+    return `<h2>Founder approval</h2>
+    <p>This is exactly what will leave the sandbox. Approval is tied to spec v${S.experimentVersion} by its exact content hash — the backend rejects anything else, including a stale version.</p>
+    ${errBanner()}
+    <div class="grid">
+      <div class="card"><h3>Actions requested</h3><table><tbody>
+        <tr><td>Publish</td><td>Landing page, experiment v${S.experimentVersion}</td></tr>
+        <tr><td>Spend</td><td>$0</td></tr>
+        <tr><td>Collect</td><td>Email address only</td></tr>
+      </tbody></table></div>
+      <div class="card"><h3>Confirm</h3>
+        <label style="font-weight:400;display:flex;gap:8px"><input type="checkbox" id="chk1" style="width:auto"> I reviewed the page and claims</label>
+        <label style="font-weight:400;display:flex;gap:8px"><input type="checkbox" id="chk2" style="width:auto"> I accept the data and consent text</label>
+        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn" id="approveBtn" onclick="approveExperiment()">${S.loading ? "Approving…" : "Approve v" + S.experimentVersion}</button>
+        </div>
+        <p style="margin-top:10px">${
+          stale ? `<span class="tag t-bad">blocked</span> Approval was for v${S.approvedVersion}. The spec is now v${S.experimentVersion}. Approve again.`
+          : S.approved ? `<span class="tag t-ok">approved</span> v${S.approvedVersion} may now execute.`
+          : `<span class="tag t-warn">waiting</span> Nothing runs until you approve.`
+        }</p>
+      </div>
+    </div>
+    ${bar(3, S.approved && !stale ? 5 : null)}`;
+  },
+
+  // 5: Execution trail -> POST/GET /runs/{id}/events
+  5() {
+    if (!(S.approved && S.approvedVersion === S.experimentVersion)) {
+      return `<h2>Execution trail</h2><div class="card"><span class="tag t-bad">blocked</span> The tool gateway has no approval for spec v${S.experimentVersion}. Approve it first.</div>${bar(4, null)}`;
+    }
+    const counts = { qa: 0, demo: 0, participant: 0 };
+    S.events.forEach(e => counts[e.source_class] = (counts[e.source_class] || 0) + 1);
+    const liveUrl = `/runs/${S.runId}/landing?mode=live`;
+    return `<h2>Execution trail</h2>
+    <p>Each row is a real receipt from <code>/runs/${S.runId}/events</code>. Only <b>participant</b> events count toward the result.</p>
+    ${errBanner()}
+    <div class="ledger">
+      <div class="p"><div class="big">${counts.participant}</div>participant events</div>
+      <div><div class="big">${counts.demo}</div>demo events</div>
+      <div><div class="big">${counts.qa}</div>qa events</div>
+    </div>
+    <div class="chips">
+      <a class="chip" href="${liveUrl}" target="_blank" rel="noopener">Open live page (real participant click)</a>
+      <button class="chip" onclick="simulateEvent('qa')">Simulate QA click</button>
+      <button class="chip" onclick="simulateEvent('demo')">Simulate demo click</button>
+    </div>
+    <div class="card scroll"><table><thead><tr><th>Time</th><th>Type</th><th>Label</th><th>Event ID</th></tr></thead><tbody>
+      ${S.events.map(e => `<tr><td>${new Date(e.created_at).toLocaleTimeString()}</td><td>${e.event_type}</td><td><span class="tag ${e.source_class==='participant'?'t-acc':'t-mute'}">${e.source_class}</span></td><td>${e.event_id}</td></tr>`).join("")}
+    </tbody></table></div>
+    ${bar(4, 6)}`;
+  },
+
+  // 6: Decision memo -> GET /runs/{id}/report
+  6() {
+    if (!S.report) return `<h2>Decision memo</h2><div class="card"><button class="btn" onclick="loadReport()">${S.loading ? "Loading…" : "Load report"}</button></div>${bar(5, null)}`;
+    const r = S.report;
+    const tagClass = r.recommendation === "proceed" ? "t-ok" : r.recommendation === "stop" ? "t-bad" : "t-warn";
+    return `<h2>Decision memo</h2>
+    <p>Separates what we learned from what we still do not know. Live from <code>/runs/${S.runId}/report</code>.</p>
+    <div class="card"><span class="tag ${tagClass}">${r.recommendation}</span><p style="margin-top:8px">${r.reason}</p>
+      <p class="mute">Events by source: participant ${r.events_by_source_class.participant}, demo ${r.events_by_source_class.demo}, qa ${r.events_by_source_class.qa}</p></div>
+    <div class="grid">
+      <div class="card"><h3>Learned</h3>${r.learned.length ? r.learned.map(e => `<div class="ev">${e.claim}<br><small>${e.source_url}</small></div>`).join("") : '<span class="mute">Nothing sourced yet.</span>'}</div>
+      <div class="card"><h3>Still unknown</h3>${r.unknowns.length ? r.unknowns.map(e => `<div class="ev">${e.claim} <span class="tag t-mute">unsourced</span></div>`).join("") : '<span class="mute">None flagged.</span>'}<div class="ev">Willingness to pay: no evidence.</div></div>
+    </div>
+    ${bar(5, null)}`;
+  },
+};
+
+function evCard(e) {
+  return `<div class="ev"><b>${e.evidence_id}</b> ${e.claim}${e.is_mock ? ' <span class="tag t-mute">mock</span>' : ''}<br><small>${e.source_url ? e.source_url : 'no source'}</small></div>`;
+}
+
+/* ---------- actions (real API calls) ---------- */
+
+async function submitIdea() {
+  S.idea.idea_text = $("#i1").value;
+  S.idea.audience = $("#i2").value;
+  S.idea.constraints = $("#i3").value;
+  S.loading = true; render();
+  try {
+    const run = await api("/runs", { method: "POST", body: JSON.stringify({ idea_text: S.idea.idea_text, owner: "Person A" }) });
+    S.runId = run.run_id;
+    S.runStatus = run.status;
+    await api(`/runs/${S.runId}/research`, { method: "POST" });
+    const ev = await api(`/runs/${S.runId}/evidence`);
+    S.evidence = ev;
+    S.runStatus = "RESEARCHED";
+    S.stage = 1;
+  } catch (e) { /* S.error already set */ }
+  S.loading = false; render();
+}
+
+async function submitExperiment() {
+  S.spec = {
+    audience: $("#e_audience").value,
+    riskiest_assumption: $("#e_risk").value,
+    hypothesis: $("#e_hyp").value,
+    offer: $("#e_offer").value,
+    cta: $("#e_cta").value,
+    primary_metric: $("#e_metric").value,
+    success_threshold: $("#e_threshold").value,
+    stop_rule: $("#e_stop").value || null,
+    duration: $("#e_duration").value || null,
+    risks: $("#e_risks").value || null,
+  };
+  S.loading = true; render();
+  try {
+    const res = await api(`/runs/${S.runId}/experiment`, { method: "POST", body: JSON.stringify(S.spec) });
+    S.experimentId = res.experiment_id;
+    S.experimentVersion = res.version;
+    S.approved = false; // new/changed version always clears approval
+    S.stage = 3;
+  } catch (e) {}
+  S.loading = false; render();
+}
+
+async function approveExperiment() {
+  S.loading = true; render();
+  try {
+    const hashRes = await api(`/runs/${S.runId}/approval-expected-hash?experiment_id=${S.experimentId}`);
+    const res = await api(`/runs/${S.runId}/approve`, {
+      method: "POST",
+      body: JSON.stringify({
+        experiment_id: S.experimentId,
+        experiment_version: S.experimentVersion,
+        action_scope: "publish_landing_page",
+        approved_by: "Person A",
+        decision: "approved",
+        content_hash: hashRes.content_hash,
+      }),
+    });
+    if (res.decision === "approved") {
+      S.approved = true;
+      S.approvedVersion = S.experimentVersion;
+    }
+  } catch (e) {}
+  S.loading = false; render();
+}
+
+async function simulateEvent(sourceClass) {
+  try {
+    await api(`/runs/${S.runId}/events`, {
+      method: "POST",
+      body: JSON.stringify({ experiment_version: S.experimentVersion, event_type: sourceClass === "qa" ? "page_view" : "cta_click", source_class: sourceClass }),
+    });
+    await loadEvents();
+  } catch (e) { render(); }
+}
+
+async function loadEvents() {
+  S.events = await api(`/runs/${S.runId}/events`);
+  render();
+}
+
+async function loadReport() {
+  S.loading = true; render();
+  try {
+    S.report = await api(`/runs/${S.runId}/report`);
+  } catch (e) {}
+  S.loading = false; render();
+}
+
+/* ---------- render loop ---------- */
+
+function render() {
+  nav();
+  $("#main").innerHTML = `<div class="banner">Connected to the real LaunchProof API. Preview/QA/demo actions never count as real participant evidence.</div><div class="fade">${V[S.stage]()}</div>`;
+}
+
+render();
+</script>
+</body>
+</html>
