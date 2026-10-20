@@ -109,6 +109,15 @@ class MaskyRun(Base):
     requested_action = Column(String, nullable=True)
     mode = Column(String, nullable=False, default="demo")
     error = Column(String, nullable=True)  # set only if the background graph run raised
+    # Masky outbound-notification state, set at most once per run (never
+    # auto-retried -- see masky_adapter.py's RealMaskyProvider for why):
+    # null = not attempted yet; "delivered" = turn confirmed sent;
+    # "failed" = a confirmed error (auth/validation/4xx/5xx), safe to know
+    # it won't silently retry; "uncertain" = a timeout at either the
+    # conversation-creation or turn-send step -- outcome unknown, deliberately
+    # left unresolved rather than risking a duplicate paid turn.
+    masky_notify_status = Column(String, nullable=True)
+    masky_conversation_id = Column(String, nullable=True)  # set once known, for manual follow-up only
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 

@@ -280,41 +280,86 @@ publishing ... without a future approval gateway."
 
 Masky is the *caller* of the two endpoints above, so no outbound Masky API
 calls are required for the core flow. The adapter module exists for the
-optional reverse direction — best-effort notifying Avery when a run reaches
-`decision_ready`/`inconclusive`, instead of making Avery poll forever — plus
-an inbound webhook receiver in case Masky ever pushes events to this backend.
+optional reverse direction — best-effort telling Avery to speak a run's
+result the first time `GET /api/runs/{id}` observes it reaching
+`decision_ready`/`inconclusive`, instead of adding an inbound webhook.
+
+**Why no webhook:** Masky's documentation (`masky.ai/api/docs`, fetched and
+read directly, not guessed) states outright: *"The documentation does not
+describe any webhooks or signature verification. Use polling instead."*
+An earlier version of this integration added a speculative
+`POST /webhooks/masky` with an invented HMAC signature scheme anyway — it
+has been removed. There is no inbound callback here; `GET /api/runs/{id}`
+polling is the only mechanism, matching what Masky itself documents.
+
+**The verified outbound contract** (`RealMaskyProvider`, read from
+`masky.ai/api/docs`):
+```
+POST {MASKY_API_BASE_URL}/conversations
+  Headers: Authorization: Bearer {MASKY_API_KEY}
+  Body:    {"avatarId": MASKY_AVATAR_ID, "avatarOwnerUserId": MASKY_AVATAR_OWNER_USER_ID}
+  Response: {"conversationId": ..., ...}
+
+POST {MASKY_API_BASE_URL}/conversations/{conversationId}/turn
+  Headers: Authorization: Bearer {MASKY_API_KEY}
+  Body:    {"userText": <short spoken-friendly summary>, "mode": "speak", "output": "text"}
+```
+`mode: "speak"` (say the text verbatim, no LLM rewrite) and `output: "text"`
+(no audio/video render) are each individually documented fields; the specific
+combination isn't shown as a worked example in the docs, so until a live call
+actually succeeds, treat that one detail as a reasoned inference, not a
+copied example. **Audio/video output is intentionally never used** — both
+are billed per second of speech per Masky's pricing table; text-mode turns
+aren't in that table at all.
 
 ```bash
 MASKY_API_KEY=
 MASKY_AVATAR_ID=
-MASKY_WEBHOOK_SECRET=
-MASKY_API_BASE_URL=https://api.masky.ai   # placeholder, unverified
-PUBLIC_API_URL=                           # documentation only; not read by the app
+MASKY_AVATAR_OWNER_USER_ID=                 # see .env.example for how to obtain this
+MASKY_API_BASE_URL=https://masky.ai/api     # verified base URL
+PUBLIC_API_URL=                             # documentation only; not read by the app
 ```
 
-- **No real Masky API contract was given or found**, so `RealMaskyProvider`
-  is an interface-shaped best guess (endpoint path, payload shape), not a
-  verified integration. It is never selected unless `MASKY_API_KEY` and
-  `MASKY_AVATAR_ID` are both set.
 - **`MockMaskyProvider` is the default** (and the only one actually
-  exercised by the test suite): it logs what it would have sent and makes
-  no network call. Every structured log line's `provider` field says
-  `"mock"` or `"real_unverified"` so this is never ambiguous from the logs.
-- `POST /webhooks/masky` verifies an inbound `X-Masky-Signature:
-  sha256=<hex hmac>` against `MASKY_WEBHOOK_SECRET` and rejects (401) if it's
-  missing, wrong, or the secret isn't configured. It logs and acknowledges
-  receipt only — it does not act on the payload, since Masky's real webhook
-  shape has not been confirmed.
+  exercised end-to-end by the test suite, and the only one this project has
+  ever actually called): it logs what it would have sent and makes no
+  network call. `RealMaskyProvider` is selected only when all three of
+  `MASKY_API_KEY`, `MASKY_AVATAR_ID`, and `MASKY_AVATAR_OWNER_USER_ID` are
+  set — missing any one keeps it on mock. Every structured log line's
+  `provider` field says `"mock"` or `"real_unverified"`, so which one ran is
+  never ambiguous from the logs; the name stays `"real_unverified"` even
+  after this rewrite, since matching the documented contract on paper is
+  not the same as a confirmed live call (none has been made).
+- **Never logged:** the API key, the `Authorization` header, or conversation
+  text content — `log_event()` only ever receives status codes, short
+  error-class strings, and ids.
+- **Duplicate-call safety:** neither `POST /conversations` nor
+  `.../turn` documents an idempotency key or safe-retry mechanism (unlike
+  `POST /avatars/{id}/speak`, a *different* endpoint, which does document
+  request deduplication). A timeout at either step is therefore never
+  retried — it's recorded as `masky_notify_status: "uncertain"` on the
+  `MaskyRun` row and left that way permanently, rather than risking a second
+  conversation or a second spoken turn with no way to know the first one
+  didn't already land. `GET /api/runs/{id}` only ever attempts a
+  notification once per run (gated on `masky_notify_status` still being
+  `null`) — a second poll, or a retried GET, never re-sends.
+- **A bug this rewrite fixed:** the notify-attempt used to be wired to fire
+  right after the graph's `start()` call in the background task — but
+  `start()` always returns at the *first* founder-approval gate, never at
+  completion (the remaining gates are approved later via
+  `/graph-runs/{run_id}/resume`). So the old code could never actually
+  notify Avery on a real run. It's now triggered from `GET
+  /api/runs/{run_id}` itself, the first time a poll observes a terminal
+  state — a better fit for a polling-only integration anyway.
 
 ### Logging
 
 Every run/Masky action logs one JSON line via `masky_adapter.log_event()`:
 `run_creation`, `workflow_start`, `agent_completion`, `workflow_failure`,
-`final_recommendation`, `masky_notify_result`, `masky_webhook_received` —
-each as `{"run_id", "source": "masky", "action", "timestamp", "status",
-"provider", "error"}`. `main.py` calls `logging.basicConfig(level=INFO)` at
-import time; without it these are silently dropped (Python's root logger
-defaults to WARNING).
+`final_recommendation`, `masky_notify_result` — each as `{"run_id",
+"source": "masky", "action", "timestamp", "status", "provider", "error"}`.
+`main.py` calls `logging.basicConfig(level=INFO)` at import time; without it
+these are silently dropped (Python's root logger defaults to WARNING).
 
 ### Sample session
 
@@ -341,9 +386,9 @@ account/billing decision. To deploy:
 1. Pick a host that runs a long-lived container/process (Masky needs to
    reach a stable HTTPS URL): Render, Fly.io, or Railway are the simplest
    fits for a single `uvicorn` process + SQLite file.
-2. Set `MASKY_API_KEY`, `MASKY_AVATAR_ID`, `MASKY_WEBHOOK_SECRET` as that
-   host's secret/environment config — never commit them to `.env` (gitignored
-   already) or anywhere in the repo.
+2. Set `MASKY_API_KEY`, `MASKY_AVATAR_ID`, `MASKY_AVATAR_OWNER_USER_ID` as
+   that host's secret/environment config — never commit them to `.env`
+   (gitignored already) or anywhere in the repo.
 3. Run `uvicorn main:app --host 0.0.0.0 --port $PORT` as the start command.
 4. Give Masky's configuration the deployed base URL (also set locally as
    `PUBLIC_API_URL` for your own reference) plus `/api/runs` as the path to
@@ -360,8 +405,18 @@ account/billing decision. To deploy:
 - Mode is hardcoded to `"demo"` in `api_runs.py`; `"live"` mode (real
   OpenAI calls via `langchain-openai`) is not wired through the Masky
   adapter.
-- `RealMaskyProvider` is unverified against Masky's actual API — treat it as
-  a stub, not a working integration, until it's smoke-tested for real.
+- `RealMaskyProvider`'s request/response contract has been verified against
+  Masky's published documentation (`masky.ai/api/docs`), but **no live call
+  to the real API has been made** — treat it as contract-correct-on-paper,
+  not a working integration, until an actual live call succeeds with
+  explicit approval.
+- No webhook: Masky documents none, so this integration is polling-only.
+  `GET /api/runs/{id}` must actually be called for Avery to ever be
+  notified — nothing pushes to Masky proactively on its own.
+- A timed-out notify attempt is left in `masky_notify_status: "uncertain"`
+  permanently (never auto-retried) — recovering from that state, if ever
+  needed, is a manual/future action, not something this code does on its
+  own.
 - The 4 founder-approval gates still require a human to call
   `/graph-runs/{run_id}/resume` directly; there is no Masky-facing approval
   path (by design — see the approval-gateway requirement above).

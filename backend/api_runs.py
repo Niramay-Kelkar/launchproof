@@ -16,10 +16,9 @@ source for them exists, which it does not in this implementation.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -27,11 +26,10 @@ import models
 from database import SessionLocal
 from launchproof.runner import Runner
 from launchproof.schemas import Idea, Settings
-from masky_adapter import get_masky_provider, log_event, verify_webhook_signature
+from masky_adapter import get_masky_provider, log_event
 
 logger = logging.getLogger("launchproof.api_runs")
 router = APIRouter(prefix="/api/runs", tags=["masky-adapter"])
-webhook_router = APIRouter(tags=["masky-adapter"])
 
 BASE_DATA_DIR = __import__("pathlib").Path(__file__).resolve().parent / "launchproof_data"
 
@@ -78,7 +76,12 @@ def _run_graph_in_background(run_id: str, idea: Idea, mode: str) -> None:
         runner = _get_runner(mode)
         runner.start(idea, Settings(mode=mode), run_id)
         log_event(run_id=run_id, action="agent_completion", status="success", provider="n/a")
-        _maybe_notify_masky(run_id, mode)
+        # Does NOT attempt a Masky notification here: start() only runs up to
+        # the first founder-approval gate (waiting_for_founder), never to
+        # completion -- the remaining gates are approved later, out of band,
+        # via /graph-runs/{run_id}/resume. Notification is instead attempted
+        # from GET /api/runs/{run_id}, the first time it observes a terminal
+        # state -- see _maybe_notify_masky below.
     except Exception as e:  # noqa: BLE001 -- must persist the failure, never raise in a background task
         logger.exception("background graph run failed for %s", run_id)
         record = db.query(models.MaskyRun).filter(models.MaskyRun.run_id == run_id).first()
@@ -90,15 +93,23 @@ def _run_graph_in_background(run_id: str, idea: Idea, mode: str) -> None:
         db.close()
 
 
-def _maybe_notify_masky(run_id: str, mode: str) -> None:
-    """Best-effort only: a run is complete regardless of whether Avery was
-    successfully notified. Only fires for a run that actually reached a
-    terminal state (decision_ready / inconclusive)."""
-    result = _run_report_snapshot(run_id, mode)
-    if result["status"] in ("decision_ready", "inconclusive"):
-        provider = get_masky_provider()
-        provider.notify_result(run_id, result)
-        log_event(run_id=run_id, action="final_recommendation", status="success", provider=provider.name)
+def _maybe_notify_masky(db: Session, record: "models.MaskyRun", snapshot: dict[str, Any]) -> None:
+    """Best-effort, at-most-once: a run is complete regardless of whether
+    Avery was successfully notified. Only attempted the first time a GET
+    observes a terminal state for this run (masky_notify_status still
+    null) -- never retried afterward, even on failure/uncertain, since
+    neither Masky endpoint involved documents a safe retry/idempotency
+    mechanism (see masky_adapter.py)."""
+    if snapshot["status"] not in ("decision_ready", "inconclusive"):
+        return
+    if record.masky_notify_status is not None:
+        return
+    provider = get_masky_provider()
+    outcome = provider.notify_result(record.run_id, snapshot)
+    record.masky_notify_status = outcome.get("status", "failed")
+    record.masky_conversation_id = outcome.get("conversation_id")
+    db.commit()
+    log_event(run_id=record.run_id, action="final_recommendation", status="success", provider=provider.name)
 
 
 # ---------- status translation ----------
@@ -217,21 +228,6 @@ def start_run(payload: StartRunRequest, background_tasks: BackgroundTasks,
         db.close()
 
 
-@webhook_router.post("/webhooks/masky", include_in_schema=False)
-async def masky_webhook(request: Request, x_masky_signature: str | None = Header(default=None)):
-    """Inbound webhook receiver, in case Masky ever pushes events to this
-    backend instead of (or in addition to) polling GET /api/runs/{id}.
-    EXPERIMENTAL: Masky's actual webhook payload shape was never provided or
-    verified, so this only authenticates the request and logs it -- it does
-    not act on the payload. Do not route real run-state changes through this
-    endpoint until Masky's real webhook contract is confirmed."""
-    body = await request.body()
-    if not verify_webhook_signature(body, x_masky_signature):
-        raise HTTPException(status_code=401, detail="invalid or missing webhook signature")
-    log_event(run_id="n/a", action="masky_webhook_received", status="success", provider="n/a")
-    return {"received": True}
-
-
 @router.get("/{run_id}")
 def get_run(run_id: str):
     db = SessionLocal()
@@ -243,6 +239,8 @@ def get_run(run_id: str):
             return {"run_id": run_id, "status": "failed", "recommendation": None,
                     "summary": None, "metrics": None, "evidence_type": None,
                     "limitations": [f"Workflow failed: {record.error}"], "next_test": None}
-        return _run_report_snapshot(run_id, record.mode)
+        snapshot = _run_report_snapshot(run_id, record.mode)
+        _maybe_notify_masky(db, record, snapshot)
+        return snapshot
     finally:
         db.close()

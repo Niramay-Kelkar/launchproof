@@ -25,7 +25,7 @@ from database import Base, engine, get_db
 from state_machine import transition, InvalidTransitionError
 from research_adapter import run_research
 from launchproof_routes import router as launchproof_router
-from api_runs import router as api_runs_router, webhook_router as masky_webhook_router
+from api_runs import router as api_runs_router
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -35,7 +35,6 @@ app = FastAPI(title="LaunchProof API")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 app.include_router(launchproof_router)
 app.include_router(api_runs_router)
-app.include_router(masky_webhook_router)
 
 # Same-origin serving (via the /app mount below) needs no CORS at all.
 # This stays on only so the mockup can also be opened from a different

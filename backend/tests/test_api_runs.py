@@ -195,12 +195,25 @@ def test_demo_mode_report_is_explicitly_labeled_simulated(client):
         assert any("demo-mode simulated" in note for note in body["limitations"])
 
 
-# ---------- 13/14/15. Masky adapter ----------
+# ---------- 13/14/15. Masky adapter: provider selection, success, and every
+# documented-against-nothing failure mode (auth, malformed, timeout, http
+# error), plus duplicate-notification protection. All against mocked httpx --
+# no real network call to masky.ai is ever made here.
+
+class _FakeResponse:
+    def __init__(self, status_code, json_body=None):
+        self.status_code = status_code
+        self._json_body = json_body if json_body is not None else {}
+
+    def json(self):
+        return self._json_body
+
 
 def test_masky_adapter_mock_provider_used_without_credentials(monkeypatch):
     import masky_adapter
     monkeypatch.setattr(masky_adapter, "MASKY_API_KEY", "")
     monkeypatch.setattr(masky_adapter, "MASKY_AVATAR_ID", "")
+    monkeypatch.setattr(masky_adapter, "MASKY_AVATAR_OWNER_USER_ID", "")
     provider = masky_adapter.get_masky_provider()
     assert isinstance(provider, masky_adapter.MockMaskyProvider)
     result = provider.notify_result("run-1", {"status": "decision_ready"})
@@ -208,66 +221,161 @@ def test_masky_adapter_mock_provider_used_without_credentials(monkeypatch):
     assert result["provider"] == "mock"
 
 
-def test_masky_adapter_real_provider_selected_with_credentials(monkeypatch):
+def test_masky_adapter_mock_provider_used_when_avatar_owner_missing(monkeypatch):
+    """avatarOwnerUserId is required by the documented /conversations
+    contract -- having an API key and avatarId is not enough on its own."""
     import masky_adapter
     monkeypatch.setattr(masky_adapter, "MASKY_API_KEY", "key")
     monkeypatch.setattr(masky_adapter, "MASKY_AVATAR_ID", "avatar")
+    monkeypatch.setattr(masky_adapter, "MASKY_AVATAR_OWNER_USER_ID", "")
+    assert isinstance(masky_adapter.get_masky_provider(), masky_adapter.MockMaskyProvider)
+
+
+def test_masky_adapter_real_provider_selected_with_full_credentials(monkeypatch):
+    import masky_adapter
+    monkeypatch.setattr(masky_adapter, "MASKY_API_KEY", "key")
+    monkeypatch.setattr(masky_adapter, "MASKY_AVATAR_ID", "avatar")
+    monkeypatch.setattr(masky_adapter, "MASKY_AVATAR_OWNER_USER_ID", "twitch:12345")
     provider = masky_adapter.get_masky_provider()
     assert isinstance(provider, masky_adapter.RealMaskyProvider)
 
 
-def test_masky_adapter_real_provider_timeout_is_handled_without_raising(monkeypatch):
+def _provider():
+    import masky_adapter
+    return masky_adapter.RealMaskyProvider("key", "avatar", "twitch:12345", "https://masky.ai/api")
+
+
+def test_real_provider_success_creates_conversation_and_sends_text_turn(monkeypatch):
+    import masky_adapter
+    calls = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        calls.append((url, json, headers))
+        if url.endswith("/conversations"):
+            return _FakeResponse(200, {"conversationId": "conv-1", "liveUrl": "https://masky.ai/live/c-1"})
+        return _FakeResponse(200, {"status": "ready"})
+
+    monkeypatch.setattr(masky_adapter.httpx, "post", fake_post)
+    result = _provider().notify_result("run-1", {"status": "decision_ready", "recommendation": "PROCEED"})
+
+    assert result == {"provider": "real_unverified", "status": "delivered", "delivered": True,
+                       "conversation_id": "conv-1"}
+    assert calls[0][0] == "https://masky.ai/api/conversations"
+    assert calls[0][1] == {"avatarId": "avatar", "avatarOwnerUserId": "twitch:12345"}
+    assert calls[1][0] == "https://masky.ai/api/conversations/conv-1/turn"
+    assert calls[1][1]["mode"] == "speak"
+    assert calls[1][1]["output"] == "text"
+    # never audio/video, and headers never carry anything beyond the bearer token
+    assert set(calls[1][1]) == {"userText", "mode", "output"}
+    assert calls[0][2] == {"Authorization": "Bearer key"}
+
+
+def test_real_provider_authentication_failure_at_conversation_step(monkeypatch):
+    import masky_adapter
+    monkeypatch.setattr(masky_adapter.httpx, "post", lambda *a, **k: _FakeResponse(401))
+    result = _provider().notify_result("run-1", {"status": "decision_ready"})
+    assert result == {"provider": "real_unverified", "status": "failed", "delivered": False,
+                       "reason": "authentication_failed"}
+
+
+def test_real_provider_malformed_conversation_response(monkeypatch):
+    import masky_adapter
+    monkeypatch.setattr(masky_adapter.httpx, "post", lambda *a, **k: _FakeResponse(200, {"unexpected": "shape"}))
+    result = _provider().notify_result("run-1", {"status": "decision_ready"})
+    assert result == {"provider": "real_unverified", "status": "failed", "delivered": False,
+                       "reason": "malformed_conversation_response"}
+
+
+def test_real_provider_timeout_at_conversation_creation_is_uncertain_not_failed(monkeypatch):
+    """A timeout before we know whether the conversation was created must be
+    reported as uncertain, not a confirmed failure -- and must not be
+    retried (no second call happens here)."""
     import httpx
     import masky_adapter
+    calls = []
 
-    def raise_timeout(*args, **kwargs):
+    def raise_timeout(*a, **k):
+        calls.append(1)
         raise httpx.TimeoutException("timed out")
 
     monkeypatch.setattr(masky_adapter.httpx, "post", raise_timeout)
-    provider = masky_adapter.RealMaskyProvider("key", "avatar", "https://api.masky.ai")
-    result = provider.notify_result("run-1", {"status": "decision_ready"})
+    result = _provider().notify_result("run-1", {"status": "decision_ready"})
+    assert result["status"] == "uncertain"
     assert result["delivered"] is False
-    assert result["reason"] == "timeout"
+    assert len(calls) == 1  # exactly one attempt -- no retry
 
 
-def test_webhook_signature_rejected_without_configured_secret(monkeypatch):
+def test_real_provider_conversation_succeeds_but_turn_fails(monkeypatch):
+    """The conversation was actually created -- its id must still be
+    returned so a human can follow up, even though the turn itself failed."""
     import masky_adapter
-    monkeypatch.setattr(masky_adapter, "MASKY_WEBHOOK_SECRET", "")
-    assert masky_adapter.verify_webhook_signature(b"payload", "sha256=anything") is False
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        if url.endswith("/conversations"):
+            return _FakeResponse(200, {"conversationId": "conv-2"})
+        return _FakeResponse(500)
+
+    monkeypatch.setattr(masky_adapter.httpx, "post", fake_post)
+    result = _provider().notify_result("run-1", {"status": "decision_ready"})
+    assert result == {"provider": "real_unverified", "status": "failed", "delivered": False,
+                       "conversation_id": "conv-2", "reason": "turn_http_500"}
 
 
-def test_webhook_signature_accepted_when_valid(monkeypatch):
-    import hashlib
-    import hmac
+def test_real_provider_turn_timeout_after_conversation_created_is_uncertain(monkeypatch):
+    import httpx
     import masky_adapter
-    monkeypatch.setattr(masky_adapter, "MASKY_WEBHOOK_SECRET", "topsecret")
-    payload = b'{"event":"ping"}'
-    sig = hmac.new(b"topsecret", payload, hashlib.sha256).hexdigest()
-    assert masky_adapter.verify_webhook_signature(payload, f"sha256={sig}") is True
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        if url.endswith("/conversations"):
+            return _FakeResponse(200, {"conversationId": "conv-3"})
+        raise httpx.TimeoutException("timed out")
+
+    monkeypatch.setattr(masky_adapter.httpx, "post", fake_post)
+    result = _provider().notify_result("run-1", {"status": "decision_ready"})
+    assert result["status"] == "uncertain"
+    assert result["conversation_id"] == "conv-3"
 
 
-def test_webhook_signature_rejected_when_tampered(monkeypatch):
+def test_real_provider_never_logs_api_key_or_auth_header(monkeypatch, caplog):
+    import logging
     import masky_adapter
-    monkeypatch.setattr(masky_adapter, "MASKY_WEBHOOK_SECRET", "topsecret")
-    assert masky_adapter.verify_webhook_signature(b"payload", "sha256=deadbeef") is False
+    monkeypatch.setattr(masky_adapter.httpx, "post", lambda *a, **k: _FakeResponse(401))
+    provider = masky_adapter.RealMaskyProvider("mky_super_secret_token", "avatar",
+                                               "twitch:12345", "https://masky.ai/api")
+    with caplog.at_level(logging.INFO, logger="launchproof.masky_adapter"):
+        provider.notify_result("run-1", {"status": "decision_ready"})
+    for record in caplog.records:
+        assert "mky_super_secret_token" not in record.getMessage()
+        assert "Bearer" not in record.getMessage()
 
 
-def test_webhook_endpoint_rejects_unsigned_requests(client, monkeypatch):
+# ---------- duplicate-notification protection ----------
+
+def test_notify_masky_is_attempted_at_most_once_per_run(monkeypatch):
+    import api_runs
     import masky_adapter
-    monkeypatch.setattr(masky_adapter, "MASKY_WEBHOOK_SECRET", "topsecret")
-    r = client.post("/webhooks/masky", json={"event": "ping"})
-    assert r.status_code == 401
+    from database import SessionLocal
 
+    calls = []
 
-def test_webhook_endpoint_accepts_correctly_signed_requests(client, monkeypatch):
-    import hashlib
-    import hmac
-    import json
-    import masky_adapter
-    monkeypatch.setattr(masky_adapter, "MASKY_WEBHOOK_SECRET", "topsecret")
-    body = json.dumps({"event": "ping"}).encode()
-    sig = hmac.new(b"topsecret", body, hashlib.sha256).hexdigest()
-    r = client.post("/webhooks/masky", content=body,
-                     headers={"X-Masky-Signature": f"sha256={sig}", "Content-Type": "application/json"})
-    assert r.status_code == 200
-    assert r.json() == {"received": True}
+    class CountingMock(masky_adapter.MockMaskyProvider):
+        def notify_result(self, run_id, result):
+            calls.append(run_id)
+            return super().notify_result(run_id, result)
+
+    monkeypatch.setattr(api_runs, "get_masky_provider", lambda: CountingMock())
+
+    db = SessionLocal()
+    import models
+    record = models.MaskyRun(idea_text="An idea long enough to pass validation here")
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    decision_ready = {"status": "decision_ready", "recommendation": "PROCEED"}
+    api_runs._maybe_notify_masky(db, record, decision_ready)
+    api_runs._maybe_notify_masky(db, record, decision_ready)  # simulates a second GET poll
+    db.close()
+
+    assert len(calls) == 1
+    assert record.masky_notify_status == "mocked"
