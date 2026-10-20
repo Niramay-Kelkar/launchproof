@@ -375,7 +375,269 @@ def test_notify_masky_is_attempted_at_most_once_per_run(monkeypatch):
     decision_ready = {"status": "decision_ready", "recommendation": "PROCEED"}
     api_runs._maybe_notify_masky(db, record, decision_ready)
     api_runs._maybe_notify_masky(db, record, decision_ready)  # simulates a second GET poll
+    db.refresh(record)  # the claim/outcome is written via a Core UPDATE, not the ORM object directly
+    status = record.masky_notify_status
     db.close()
 
     assert len(calls) == 1
-    assert record.masky_notify_status == "mocked"
+    assert status == "mocked"
+
+
+def test_non_terminal_run_never_invokes_the_provider(monkeypatch):
+    """A run still waiting for a founder gate must never trigger a Masky
+    call -- only decision_ready/inconclusive are terminal."""
+    import api_runs
+    import masky_adapter
+    import models
+    from database import SessionLocal
+
+    calls = []
+
+    class CountingMock(masky_adapter.MockMaskyProvider):
+        def notify_result(self, run_id, result):
+            calls.append(run_id)
+            return super().notify_result(run_id, result)
+
+    monkeypatch.setattr(api_runs, "get_masky_provider", lambda: CountingMock())
+
+    db = SessionLocal()
+    record = models.MaskyRun(idea_text="An idea long enough to pass validation here")
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    for status in ("researching", "researched", "experiment_proposed", "asset_built", "approval_required"):
+        api_runs._maybe_notify_masky(db, record, {"status": status})
+    db.close()
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("prior_status", ["delivered", "failed", "uncertain", "mocked", "in_progress"])
+def test_a_second_call_after_any_prior_outcome_never_invokes_the_provider(monkeypatch, prior_status):
+    """Whatever the first attempt's outcome (success, confirmed failure, an
+    ambiguous timeout, the mock path, or even a still-in-progress claim from
+    a crashed attempt), a later call must never call the provider again --
+    there is no automatic retry for any of these states."""
+    import api_runs
+    import masky_adapter
+    import models
+    from database import SessionLocal
+
+    calls = []
+
+    class CountingMock(masky_adapter.MockMaskyProvider):
+        def notify_result(self, run_id, result):
+            calls.append(run_id)
+            return super().notify_result(run_id, result)
+
+    monkeypatch.setattr(api_runs, "get_masky_provider", lambda: CountingMock())
+
+    db = SessionLocal()
+    record = models.MaskyRun(idea_text="An idea long enough to pass validation here",
+                             masky_notify_status=prior_status)
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    api_runs._maybe_notify_masky(db, record, {"status": "decision_ready", "recommendation": "PROCEED"})
+    db.close()
+
+    assert calls == []
+
+
+def test_provider_failure_and_uncertain_outcomes_are_recorded_without_retry(monkeypatch):
+    """A confirmed failure and an ambiguous timeout must each be persisted
+    as their own distinct masky_notify_status, and neither is retried by a
+    second call."""
+    import api_runs
+    import models
+    from database import SessionLocal
+
+    for outcome_status in ("failed", "uncertain"):
+        calls = []
+
+        class OnceProvider:
+            name = "real_unverified"
+
+            def notify_result(self, run_id, result):
+                calls.append(run_id)
+                return {"provider": self.name, "status": outcome_status, "delivered": False,
+                        "reason": "simulated"}
+
+        monkeypatch.setattr(api_runs, "get_masky_provider", lambda: OnceProvider())
+
+        db = SessionLocal()
+        record = models.MaskyRun(idea_text="An idea long enough to pass validation here")
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+
+        decision_ready = {"status": "decision_ready", "recommendation": "PROCEED"}
+        api_runs._maybe_notify_masky(db, record, decision_ready)
+        db.refresh(record)
+        assert record.masky_notify_status == outcome_status
+        assert len(calls) == 1
+
+        api_runs._maybe_notify_masky(db, record, decision_ready)  # second attempt, e.g. a later poll
+        db.close()
+        assert len(calls) == 1  # still exactly one -- no automatic retry
+
+
+# ---------- genuine concurrency: barrier-synchronized, independent sessions ----------
+
+def test_concurrent_notify_calls_result_in_exactly_one_provider_invocation(monkeypatch):
+    """5+ threads, each with its OWN database Session (as real concurrent
+    GET /api/runs/{id} requests would have), all racing on the SAME run via
+    a threading.Barrier so they genuinely overlap instead of a sleep-based
+    approximation of a race."""
+    import threading
+
+    import api_runs
+    import masky_adapter
+    import models
+    from database import SessionLocal
+
+    N = 8
+    calls = []
+    calls_lock = threading.Lock()
+
+    class CountingMock(masky_adapter.MockMaskyProvider):
+        def notify_result(self, run_id, result):
+            with calls_lock:
+                calls.append(run_id)
+            return super().notify_result(run_id, result)
+
+    monkeypatch.setattr(api_runs, "get_masky_provider", lambda: CountingMock())
+
+    setup_db = SessionLocal()
+    record = models.MaskyRun(idea_text="An idea long enough to pass validation here")
+    setup_db.add(record)
+    setup_db.commit()
+    setup_db.refresh(record)
+    run_id = record.run_id
+    setup_db.close()
+
+    decision_ready = {"status": "decision_ready", "recommendation": "PROCEED"}
+    barrier = threading.Barrier(N)
+    errors = []
+
+    def worker():
+        db = SessionLocal()  # independent session per "request", like a real GET handler
+        try:
+            own_record = db.query(models.MaskyRun).filter(models.MaskyRun.run_id == run_id).first()
+            barrier.wait(timeout=5)  # force genuinely simultaneous entry, no sleep-based timing
+            api_runs._maybe_notify_masky(db, own_record, decision_ready)
+        except Exception as e:  # noqa: BLE001 -- surface any worker exception to the main thread
+            errors.append(e)
+        finally:
+            db.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(N)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert errors == []
+    assert len(calls) == 1
+
+    verify_db = SessionLocal()
+    final = verify_db.query(models.MaskyRun).filter(models.MaskyRun.run_id == run_id).first()
+    assert final.masky_notify_status == "mocked"
+    verify_db.close()
+
+
+def test_concurrent_notify_calls_with_a_slow_provider_still_invoke_it_once(monkeypatch):
+    """Same race, but the provider call itself is slow (simulating real
+    network latency to masky.ai), to prove the claim is held for the whole
+    duration of notify_result(), not just the instant of the UPDATE."""
+    import threading
+    import time as time_module
+
+    import api_runs
+    import masky_adapter
+    import models
+    from database import SessionLocal
+
+    N = 6
+    calls = []
+    calls_lock = threading.Lock()
+
+    class SlowMock(masky_adapter.MockMaskyProvider):
+        def notify_result(self, run_id, result):
+            with calls_lock:
+                calls.append(run_id)
+            time_module.sleep(0.1)
+            return super().notify_result(run_id, result)
+
+    monkeypatch.setattr(api_runs, "get_masky_provider", lambda: SlowMock())
+
+    setup_db = SessionLocal()
+    record = models.MaskyRun(idea_text="An idea long enough to pass validation here")
+    setup_db.add(record)
+    setup_db.commit()
+    setup_db.refresh(record)
+    run_id = record.run_id
+    setup_db.close()
+
+    decision_ready = {"status": "decision_ready", "recommendation": "PROCEED"}
+    barrier = threading.Barrier(N)
+
+    def worker():
+        db = SessionLocal()
+        own_record = db.query(models.MaskyRun).filter(models.MaskyRun.run_id == run_id).first()
+        barrier.wait(timeout=5)
+        api_runs._maybe_notify_masky(db, own_record, decision_ready)
+        db.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(N)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(calls) == 1
+
+
+def test_an_unexpected_provider_exception_leaves_the_claim_in_progress_and_is_not_retried(monkeypatch):
+    """If a provider implementation has a bug and raises instead of
+    returning a result dict, the claim must not be lost/reclaimed (that
+    would risk a duplicate real call on the next poll) -- it stays
+    'in_progress' for manual follow-up, and GET must not 500 because of it."""
+    import api_runs
+    import models
+    from database import SessionLocal
+
+    class BrokenProvider:
+        name = "real_unverified"
+
+        def notify_result(self, run_id, result):
+            raise RuntimeError("simulated provider bug")
+
+    monkeypatch.setattr(api_runs, "get_masky_provider", lambda: BrokenProvider())
+
+    db = SessionLocal()
+    record = models.MaskyRun(idea_text="An idea long enough to pass validation here")
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    decision_ready = {"status": "decision_ready", "recommendation": "PROCEED"}
+    api_runs._maybe_notify_masky(db, record, decision_ready)  # must not raise
+    db.refresh(record)
+    assert record.masky_notify_status == "in_progress"
+
+    # A second call must not reclaim it -- the row stays stuck until a
+    # human intervenes, by design.
+    calls = []
+
+    class ShouldNeverRun:
+        def notify_result(self, run_id, result):
+            calls.append(run_id)
+            raise AssertionError("must not be called for an already-claimed run")
+
+    monkeypatch.setattr(api_runs, "get_masky_provider", lambda: ShouldNeverRun())
+    api_runs._maybe_notify_masky(db, record, decision_ready)
+    db.close()
+    assert calls == []

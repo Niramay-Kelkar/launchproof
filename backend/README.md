@@ -29,6 +29,31 @@ on some synced/networked folder (Dropbox, some sandboxed VMs), point `DATABASE_U
 in `.env` at a local path instead, e.g. `sqlite:////tmp/launchproof.db` — it's a
 filesystem locking quirk, not an app bug.
 
+## Database migrations
+
+**Existing databases are migrated automatically, in place — you never need
+to delete `launchproof.db`.** `main.py` calls `Base.metadata.create_all()`
+(creates any missing table, e.g. on a brand-new database) and then
+`migrations.run_migrations()` every time the app starts. `create_all()`
+only creates *missing tables* — it never alters a table that already
+exists, which is why an existing `masky_runs` table (from before the
+`masky_notify_status`/`masky_conversation_id` columns existed) needed a
+real migration, not just a restart. `migrations.py` is a small, explicit,
+hand-written list of `(table, column, type)` entries — there was no
+migration framework (Alembic or similar) anywhere in this project to
+extend, so this is deliberately the smallest mechanism that covers exactly
+what's needed, not a general one. Each entry checks via introspection
+whether the column already exists before doing anything, so running it on
+every startup (including two instances starting at the same moment) is
+always safe — it never re-applies, never touches existing rows' data, and
+never drops anything.
+
+To apply the same migration without starting the full app (e.g. before
+deploying a new version while an old process still holds the port):
+```bash
+python migrations.py
+```
+
 ## Run the tests
 
 From the **repo root** (not from `backend/`):
@@ -340,17 +365,51 @@ PUBLIC_API_URL=                             # documentation only; not read by th
   retried — it's recorded as `masky_notify_status: "uncertain"` on the
   `MaskyRun` row and left that way permanently, rather than risking a second
   conversation or a second spoken turn with no way to know the first one
-  didn't already land. `GET /api/runs/{id}` only ever attempts a
-  notification once per run (gated on `masky_notify_status` still being
-  `null`) — a second poll, or a retried GET, never re-sends.
-- **A bug this rewrite fixed:** the notify-attempt used to be wired to fire
-  right after the graph's `start()` call in the background task — but
-  `start()` always returns at the *first* founder-approval gate, never at
-  completion (the remaining gates are approved later via
-  `/graph-runs/{run_id}/resume`). So the old code could never actually
-  notify Avery on a real run. It's now triggered from `GET
-  /api/runs/{run_id}` itself, the first time a poll observes a terminal
-  state — a better fit for a polling-only integration anyway.
+  didn't already land.
+- **Notification happens only when polled, and the claim is atomic, not
+  read-then-write.** `GET /api/runs/{run_id}` is the only place a Masky
+  notification is attempted — nothing pushes to Masky on its own. The first
+  time a poll observes a terminal state (`decision_ready`/`inconclusive`),
+  `api_runs._maybe_notify_masky()` runs a single conditional `UPDATE
+  masky_runs SET masky_notify_status = 'in_progress' WHERE run_id = ? AND
+  masky_notify_status IS NULL` and checks it actually changed one row
+  *before* calling the provider. Two GET requests racing on the same run
+  (each with its own database session, as real concurrent requests would
+  have) can both reach this function at the same instant; only one's
+  `UPDATE` matches — SQLite's single-writer lock serializes the two
+  statements, so whichever executes first wins and the other sees zero
+  rows affected and returns immediately without ever calling the provider.
+  A plain "read `masky_notify_status` in Python, then write" check (what
+  this code did before) does not have this guarantee, because both
+  requests can read `null` before either writes.
+- **Delivery latency depends entirely on Masky's own polling cadence.** The
+  gap between a run actually reaching `decision_ready` (as soon as a human
+  approves the last gate via `/graph-runs/{run_id}/resume`) and Avery
+  finding out is however long it takes for the *next* `GET
+  /api/runs/{run_id}` call to arrive — it could be near-instant or
+  arbitrarily delayed. If Masky stops polling a run it considers stale
+  before that run completes, notification never happens at all; nothing in
+  this backend retries or sweeps for missed notifications.
+- **If a process crashes between claiming and finishing** (after the
+  `in_progress` `UPDATE` commits but before the provider call returns and
+  the final-outcome `UPDATE` runs), the row is left at `masky_notify_status
+  = "in_progress"` permanently. This is intentional: automatically
+  reclaiming it risks a second real conversation/turn with no way to know
+  whether the first one actually reached Masky. **Operationally**, a row
+  stuck at `in_progress` must be found and resolved by hand — e.g.
+  `SELECT run_id, masky_conversation_id, updated_at FROM masky_runs WHERE
+  masky_notify_status = 'in_progress'`, then check Masky's dashboard/API
+  for whether that `masky_conversation_id` (if one was recorded) actually
+  received a turn, and manually set `masky_notify_status` to `"delivered"`
+  or `"failed"` accordingly. This code never does that automatically.
+- **A bug fixed before the atomic-claim work above:** the notify-attempt
+  used to be wired to fire right after the graph's `start()` call in the
+  background task — but `start()` always returns at the *first*
+  founder-approval gate, never at completion (the remaining gates are
+  approved later via `/graph-runs/{run_id}/resume`). So the old code could
+  never actually notify Avery on a real run. It's now triggered from `GET
+  /api/runs/{run_id}` itself — a better fit for a polling-only integration
+  anyway, and the only place it's attempted at all.
 
 ### Logging
 
@@ -410,13 +469,8 @@ account/billing decision. To deploy:
   to the real API has been made** — treat it as contract-correct-on-paper,
   not a working integration, until an actual live call succeeds with
   explicit approval.
-- No webhook: Masky documents none, so this integration is polling-only.
-  `GET /api/runs/{id}` must actually be called for Avery to ever be
-  notified — nothing pushes to Masky proactively on its own.
-- A timed-out notify attempt is left in `masky_notify_status: "uncertain"`
-  permanently (never auto-retried) — recovering from that state, if ever
-  needed, is a manual/future action, not something this code does on its
-  own.
+- No webhook: Masky documents none, so this integration is polling-only —
+  see the latency/crash-recovery notes in the Masky adapter section above.
 - The 4 founder-approval gates still require a human to call
   `/graph-runs/{run_id}/resume` directly; there is no Masky-facing approval
   path (by design — see the approval-gateway requirement above).

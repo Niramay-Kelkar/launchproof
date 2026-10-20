@@ -20,6 +20,8 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 import models
@@ -96,18 +98,60 @@ def _run_graph_in_background(run_id: str, idea: Idea, mode: str) -> None:
 def _maybe_notify_masky(db: Session, record: "models.MaskyRun", snapshot: dict[str, Any]) -> None:
     """Best-effort, at-most-once: a run is complete regardless of whether
     Avery was successfully notified. Only attempted the first time a GET
-    observes a terminal state for this run (masky_notify_status still
-    null) -- never retried afterward, even on failure/uncertain, since
-    neither Masky endpoint involved documents a safe retry/idempotency
-    mechanism (see masky_adapter.py)."""
+    observes a terminal state for this run -- never retried afterward, even
+    on failure/uncertain, since neither Masky endpoint involved documents a
+    safe retry/idempotency mechanism (see masky_adapter.py).
+
+    Claiming is an atomic conditional UPDATE, not a read-then-write on the
+    already-loaded `record` object: two GET requests (each with its own
+    Session, possibly running in different threadpool threads) can reach
+    this function for the same run at effectively the same instant. Only the
+    UPDATE whose WHERE clause still matches (masky_notify_status IS NULL)
+    actually changes a row; SQLite's single-writer lock means that even if
+    both issue the statement in the same instant, one physically executes
+    first and the other's WHERE clause then matches zero rows. Checking
+    `record.masky_notify_status` in Python first, then writing, would have
+    exactly this race: both requests can read NULL before either writes.
+
+    If the process crashes after this claim commits but before the second
+    UPDATE (the one that records the provider's actual outcome), the row is
+    left at 'in_progress' permanently -- this is intentional, not a bug: an
+    automatic reclaim would risk a second real Masky conversation/turn with
+    no way to know whether the first one actually landed. An 'in_progress'
+    row that is not progressing must be inspected and resolved manually
+    (see README) -- it is never auto-retried by this code."""
     if snapshot["status"] not in ("decision_ready", "inconclusive"):
         return
-    if record.masky_notify_status is not None:
-        return
+
+    try:
+        claim = db.execute(
+            update(models.MaskyRun)
+            .where(models.MaskyRun.run_id == record.run_id, models.MaskyRun.masky_notify_status.is_(None))
+            .values(masky_notify_status="in_progress")
+        )
+        db.commit()
+    except OperationalError:
+        db.rollback()
+        raise
+    if claim.rowcount != 1:
+        return  # already claimed (by this or an earlier request) or already resolved
+
     provider = get_masky_provider()
-    outcome = provider.notify_result(record.run_id, snapshot)
-    record.masky_notify_status = outcome.get("status", "failed")
-    record.masky_conversation_id = outcome.get("conversation_id")
+    try:
+        outcome = provider.notify_result(record.run_id, snapshot)
+    except Exception as e:  # noqa: BLE001 -- a provider bug must not 500 the GET or hide the claim
+        logger.exception("Masky notify_result raised unexpectedly for %s; leaving "
+                         "masky_notify_status='in_progress' for manual follow-up", record.run_id)
+        log_event(run_id=record.run_id, action="final_recommendation", status="failure",
+                  provider=getattr(provider, "name", "unknown"), error=f"unexpected exception: {type(e).__name__}")
+        return
+
+    db.execute(
+        update(models.MaskyRun)
+        .where(models.MaskyRun.run_id == record.run_id)
+        .values(masky_notify_status=outcome.get("status", "failed"),
+                masky_conversation_id=outcome.get("conversation_id"))
+    )
     db.commit()
     log_event(run_id=record.run_id, action="final_recommendation", status="success", provider=provider.name)
 

@@ -26,10 +26,16 @@ from state_machine import transition, InvalidTransitionError
 from research_adapter import run_research
 from launchproof_routes import router as launchproof_router
 from api_runs import router as api_runs_router
+from migrations import run_migrations
 
 BASE_DIR = Path(__file__).resolve().parent
 
 Base.metadata.create_all(bind=engine)
+# create_all() only creates missing tables -- it never alters a table that
+# already exists, so an existing launchproof.db from before a column was
+# added needs this to pick up new, nullable columns in place. See
+# migrations.py. Runs automatically on every startup; no manual step needed.
+run_migrations(engine)
 
 app = FastAPI(title="LaunchProof API")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
