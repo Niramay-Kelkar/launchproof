@@ -36,6 +36,7 @@ class EvidenceItem(Base):
     evidence_type = Column(String, nullable=False)
     confidence = Column(String, nullable=False, default="medium")  # low/medium/high
     is_mock = Column(Integer, default=1)  # 1 = fixture/mock data, 0 = real adapter call
+    source = Column(String, nullable=True)  # "founder_pasted" or "glasser"; null for fixture/mock data
 
 
 class ExperimentSpec(Base):

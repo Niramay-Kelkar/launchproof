@@ -39,6 +39,7 @@ def fixture_research(idea_text: str):
             "evidence_type": "inference",
             "confidence": "low",
             "is_mock": 1,
+            "source": None,
         },
     ]
 
@@ -57,18 +58,20 @@ def extract_urls(idea_text: str) -> list[str]:
     return urls
 
 
-def merge_and_cap_urls(*url_lists: list[str]) -> list[str]:
-    """Merge any number of URL lists in order, dedupe (trailing-slash- and
-    case-insensitive), and apply ONE overall cap across all sources --
-    founder-pasted and Glasser-discovered URLs are not capped separately."""
+def merge_and_cap_urls(*labeled_url_lists: tuple[str, list[str]]) -> list[tuple[str, str]]:
+    """Merge any number of (source_label, urls) pairs in order, dedupe
+    (trailing-slash- and case-insensitive, first source seen wins), and apply
+    ONE overall cap across all sources -- founder-pasted and Glasser-discovered
+    URLs are not capped separately. Returns (url, source_label) pairs so
+    callers can tell which source each surviving URL came from."""
     merged = []
     seen = set()
-    for urls in url_lists:
+    for source, urls in labeled_url_lists:
         for url in urls:
             key = url.rstrip("/").lower()
             if key not in seen:
                 seen.add(key)
-                merged.append(url)
+                merged.append((url, source))
     return merged[:MAX_URLS]
 
 
@@ -99,10 +102,10 @@ def real_research(idea_text: str):
         logger.exception("glasser_client.discover_urls raised unexpectedly; "
                           "continuing with founder-pasted URLs only")
         discovered = []
-    candidates = merge_and_cap_urls(extract_urls(idea_text), discovered)
+    candidates = merge_and_cap_urls(("founder_pasted", extract_urls(idea_text)), ("glasser", discovered))
 
     results = []
-    for url in candidates:
+    for url, source in candidates:
         try:
             page = _web.fetch(url)
         except FetchError:
@@ -115,6 +118,7 @@ def real_research(idea_text: str):
             "evidence_type": "fact",
             "confidence": "medium",
             "is_mock": 0,
+            "source": source,
         })
     return results
 

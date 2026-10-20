@@ -69,6 +69,7 @@ def test_real_research_builds_sourced_evidence_from_a_fetched_page(monkeypatch):
     assert item["excerpt"].startswith("Plans start at $10/month.")
     assert len(item["excerpt"]) <= 500
     assert "Example Pricing" in item["claim"]
+    assert item["source"] == "founder_pasted"
     # same keys as the fixture path, so callers never have to branch on adapter
     assert set(item) == set(research_adapter.fixture_research("x")[0])
 
@@ -79,10 +80,13 @@ def test_merge_and_cap_urls_dedupes_across_sources_and_applies_one_overall_cap()
     pasted = ["https://a.example.com/", "https://b.example.com"]
     discovered = ["https://b.example.com/", "https://c.example.com", "https://d.example.com",
                   "https://e.example.com", "https://f.example.com"]
-    merged = research_adapter.merge_and_cap_urls(pasted, discovered)
+    merged = research_adapter.merge_and_cap_urls(("founder_pasted", pasted), ("glasser", discovered))
     assert merged == [
-        "https://a.example.com/", "https://b.example.com", "https://c.example.com",
-        "https://d.example.com", "https://e.example.com",
+        ("https://a.example.com/", "founder_pasted"),
+        ("https://b.example.com", "founder_pasted"),
+        ("https://c.example.com", "glasser"),
+        ("https://d.example.com", "glasser"),
+        ("https://e.example.com", "glasser"),
     ]
     assert len(merged) == research_adapter.MAX_URLS
 
@@ -100,6 +104,7 @@ def test_real_research_is_unaffected_when_glasser_disabled(monkeypatch):
     results = research_adapter.real_research("See https://example.com/pasted for reference")
     assert len(results) == 1
     assert results[0]["source_url"] == "https://example.com/pasted"
+    assert results[0]["source"] == "founder_pasted"
 
 
 def test_real_research_merges_glasser_discovered_urls_with_pasted_ones(monkeypatch):
@@ -117,6 +122,9 @@ def test_real_research_merges_glasser_discovered_urls_with_pasted_ones(monkeypat
 
     assert set(fetched) == {"https://pasted.example.com/ref", "https://discovered.example.com/found"}
     assert len(results) == 2
+    sources_by_url = {r["source_url"]: r["source"] for r in results}
+    assert sources_by_url["https://pasted.example.com/ref"] == "founder_pasted"
+    assert sources_by_url["https://discovered.example.com/found"] == "glasser"
 
 
 def test_real_research_falls_back_to_pasted_urls_when_glasser_raises(monkeypatch):
@@ -136,6 +144,7 @@ def test_real_research_falls_back_to_pasted_urls_when_glasser_raises(monkeypatch
     results = research_adapter.real_research("See https://example.com/pasted for reference")
     assert len(results) == 1
     assert results[0]["source_url"] == "https://example.com/pasted"
+    assert results[0]["source"] == "founder_pasted"
 
 
 def test_real_research_returns_empty_when_glasser_returns_nothing_and_no_pasted_urls(monkeypatch):

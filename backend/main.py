@@ -110,6 +110,7 @@ def do_research(run_id: str, db: Session = Depends(get_db)):
             evidence_type=item["evidence_type"],
             confidence=item.get("confidence", "medium"),
             is_mock=item.get("is_mock", 1),
+            source=item.get("source"),
         )
         db.add(ev)
         created.append(ev)
@@ -132,6 +133,7 @@ def get_evidence(run_id: str, db: Session = Depends(get_db)):
             "evidence_type": i.evidence_type,
             "confidence": i.confidence,
             "is_mock": bool(i.is_mock),
+            "source": i.source,
         }
         for i in items
     ]
@@ -374,6 +376,7 @@ def get_report(run_id: str, db: Session = Depends(get_db)):
                 "source_title": e.source_title,
                 "evidence_type": e.evidence_type,
                 "is_mock": bool(e.is_mock),
+                "source": e.source,
             }
             for e in evidence
         ],
