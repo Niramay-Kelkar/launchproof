@@ -101,11 +101,30 @@ const S = {
   approvedVersion: null,
   events: [],
   report: null,
+  reportEvents: null,
+  reportEventsError: null,
   error: null,
   loading: false,
 };
 
 const $ = s => document.querySelector(s);
+
+// HTML-escapes text pulled from API data (claims, titles, ids) before it
+// goes into innerHTML -- evidence claims and titles can contain arbitrary
+// text, so this is not optional for anything rendered from them.
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+// Only ever renders an http(s) URL as a clickable link -- rejects
+// javascript:/data: and anything else that isn't a plain web link.
+function safeUrl(u) {
+  try {
+    const parsed = new URL(u, location.origin);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
 
 async function api(path, opts) {
   S.error = null;
@@ -286,22 +305,88 @@ const V = {
     ${bar(4, 6)}`;
   },
 
-  // 6: Decision memo -> GET /runs/{id}/report
+  // 6: Decision memo -> GET /runs/{id}/report (+ GET /runs/{id}/events for inspectable event detail)
   6() {
-    if (!S.report) return `<h2>Decision memo</h2><div class="card"><button class="btn" onclick="loadReport()">${S.loading ? "Loading…" : "Load report"}</button></div>${bar(5, null)}`;
+    if (!S.report) return `<h2>Decision memo</h2>${errBanner()}<div class="card"><button class="btn" onclick="loadReport()">${S.loading ? "Loading…" : "Load report"}</button></div>${bar(5, null)}`;
     const r = S.report;
+    // recommendation/reason/counts below are rendered exactly as the API
+    // returned them -- never recomputed or overridden client-side.
     const tagClass = r.recommendation === "proceed" ? "t-ok" : r.recommendation === "stop" ? "t-bad" : "t-warn";
+
+    const evidenceItems = r.evidence || [];
+    const sourced = evidenceItems.filter(e => e.source_url);
+    const unsourced = evidenceItems.filter(e => !e.source_url);
+    let evidenceHtml;
+    if (evidenceItems.length === 0) {
+      evidenceHtml = `<div class="card"><span class="mute">No research evidence has been collected for this run.</span></div>`;
+    } else if (sourced.length === 0) {
+      evidenceHtml = `<div class="card"><h3>Hypotheses / unverified claims</h3>
+        <p class="mute">Evidence exists, but none of it is source-backed — every item below is an inference or assumption, not a verified finding.</p>
+        ${unsourced.map(memoEvidenceCard).join("")}</div>`;
+    } else if (unsourced.length === 0) {
+      evidenceHtml = `<div class="card"><h3>Source-backed evidence</h3>${sourced.map(memoEvidenceCard).join("")}</div>`;
+    } else {
+      evidenceHtml = `<div class="grid">
+        <div class="card"><h3>Source-backed evidence</h3>${sourced.map(memoEvidenceCard).join("")}</div>
+        <div class="card"><h3>Hypotheses / unverified claims</h3>${unsourced.map(memoEvidenceCard).join("")}</div>
+      </div>`;
+    }
+
     return `<h2>Decision memo</h2>
     <p>Separates what we learned from what we still do not know. Live from <code>/runs/${S.runId}/report</code>.</p>
-    <div class="card"><span class="tag ${tagClass}">${r.recommendation}</span><p style="margin-top:8px">${r.reason}</p>
-      <p class="mute">Events by source: participant ${r.events_by_source_class.participant}, demo ${r.events_by_source_class.demo}, qa ${r.events_by_source_class.qa}</p></div>
-    <div class="grid">
-      <div class="card"><h3>Learned</h3>${r.learned.length ? r.learned.map(e => `<div class="ev">${e.claim}<br><small>${e.source_url}</small></div>`).join("") : '<span class="mute">Nothing sourced yet.</span>'}</div>
-      <div class="card"><h3>Still unknown</h3>${r.unknowns.length ? r.unknowns.map(e => `<div class="ev">${e.claim} <span class="tag t-mute">unsourced</span></div>`).join("") : '<span class="mute">None flagged.</span>'}<div class="ev">Willingness to pay: no evidence.</div></div>
+    ${errBanner()}
+    <div class="card"><span class="tag ${tagClass}">${esc(r.recommendation)}</span><p style="margin-top:8px">${esc(r.reason)}</p>
+      <p class="mute">Events by source: participant ${r.events_by_source_class.participant}, demo ${r.events_by_source_class.demo}, qa ${r.events_by_source_class.qa}</p>
+      ${eventsTableHtml()}
     </div>
+    ${evidenceHtml}
+    <div class="card"><div class="ev">Willingness to pay: no evidence.</div></div>
     ${bar(5, null)}`;
   },
 };
+
+// Renders one evidence item for the decision memo: claim first (never
+// dropped), then how it's classified, never upgrading a URL's mere
+// presence into "verified" -- a URL only means source-backed, not
+// independently confirmed.
+function memoEvidenceCard(e) {
+  const hasUrl = !!e.source_url;
+  const safe = hasUrl ? safeUrl(e.source_url) : null;
+  const kindTag = hasUrl
+    ? '<span class="tag t-ok">Source-backed evidence</span>'
+    : '<span class="tag t-warn">Hypothesis / unverified claim</span>';
+  const mockTag = e.is_mock ? ' <span class="tag t-mute">mock</span>' : '';
+  const typeTag = e.evidence_type ? ` <span class="tag t-mute">${esc(e.evidence_type)}</span>` : '';
+  const provTag = e.source ? ` <span class="tag t-acc">${esc(e.source)}</span>` : '';
+  let linkHtml = '';
+  if (hasUrl) {
+    const linkText = e.source_title ? esc(e.source_title) : esc(e.source_url);
+    linkHtml = safe
+      ? `<br><small><a href="${safe}" target="_blank" rel="noopener noreferrer">${linkText}</a></small>`
+      : `<br><small>${linkText} <span class="mute">(link unavailable)</span></small>`;
+  }
+  return `<div class="ev"><div>${esc(e.claim)}</div><div style="margin-top:4px">${kindTag}${mockTag}${typeTag}${provTag}</div>${linkHtml}</div>`;
+}
+
+// Per-event inspection table for the decision memo. Reuses the Execution
+// Trail table's columns/conventions. Source-class labels are always shown
+// as text (participant/demo/qa), never color-only -- and never used to
+// infer anything beyond what the API already tagged the event as.
+function eventsTableHtml() {
+  if (S.reportEventsError) {
+    return `<p class="mute">Event details could not be loaded (${esc(S.reportEventsError)}).</p>`;
+  }
+  if (S.reportEvents === null) {
+    return `<p class="mute">Loading events…</p>`;
+  }
+  if (S.reportEvents.length === 0) {
+    return `<p class="mute">No events recorded for this run yet.</p>`;
+  }
+  const classTag = sc => sc === "participant" ? "t-acc" : sc === "demo" ? "t-warn" : "t-mute";
+  return `<div class="card scroll"><table><thead><tr><th>Time</th><th>Event type</th><th>Source class</th><th>Event ID</th></tr></thead><tbody>
+    ${S.reportEvents.map(e => `<tr><td>${esc(new Date(e.created_at).toLocaleTimeString())}</td><td>${esc(e.event_type)}</td><td><span class="tag ${classTag(e.source_class)}">${esc(e.source_class)}</span></td><td>${esc(e.event_id)}</td></tr>`).join("")}
+  </tbody></table></div>`;
+}
 
 function evCard(e) {
   return `<div class="ev"><b>${e.evidence_id}</b> ${e.claim}${e.is_mock ? ' <span class="tag t-mute">mock</span>' : ''}<br><small>${e.source_url ? e.source_url : 'no source'}</small></div>`;
@@ -313,6 +398,7 @@ async function submitIdea() {
   S.idea.idea_text = $("#i1").value;
   S.idea.audience = $("#i2").value;
   S.idea.constraints = $("#i3").value;
+  S.report = null; S.reportEvents = null; S.reportEventsError = null; // clear any prior run's memo
   S.loading = true; render();
   try {
     const run = await api("/runs", { method: "POST", body: JSON.stringify({ idea_text: S.idea.idea_text, owner: "Person A" }) });
@@ -394,6 +480,17 @@ async function loadReport() {
   try {
     S.report = await api(`/runs/${S.runId}/report`);
   } catch (e) {}
+  // A failed events fetch must not make the report itself unusable --
+  // caught separately so the memo still renders with whatever S.report
+  // already has, and the events section explains it couldn't load rather
+  // than silently claiming there were no events.
+  try {
+    S.reportEvents = await api(`/runs/${S.runId}/events`);
+    S.reportEventsError = null;
+  } catch (e) {
+    S.reportEvents = null;
+    S.reportEventsError = e.message || String(e);
+  }
   S.loading = false; render();
 }
 
