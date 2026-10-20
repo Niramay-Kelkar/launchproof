@@ -1,0 +1,9 @@
+{
+  "name": "MaintenanceTriage",
+  "problem": "Independent property managers receive maintenance requests as unstructured email and phone messages, making urgent requests easy to miss.",
+  "customer": "Independent property managers with 50 to 500 rental units",
+  "solution": "An assistant that organizes inbound maintenance requests into prioritized work-order drafts for manager review",
+  "geography": "United States",
+  "constraints": ["No unsolicited outreach", "Do not collect tenant personal data"],
+  "competitor_urls": []
+}
