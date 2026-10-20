@@ -95,6 +95,24 @@ class Event(Base):
     created_at = Column(DateTime, default=utcnow)
 
 
+class MaskyRun(Base):
+    """Metadata for a run started via POST /api/runs (the Masky-facing adapter).
+    The run's actual progress lives in the LangGraph checkpointer
+    (launchproof_data/<mode>/checkpoints.sqlite), keyed by this same run_id as
+    its thread_id -- this table exists only for idempotency-key dedup and to
+    record a background-task failure the checkpointer wouldn't otherwise show."""
+    __tablename__ = "masky_runs"
+    run_id = Column(String, primary_key=True, default=lambda: new_id("lp"))
+    idempotency_key = Column(String, nullable=True, unique=True)
+    idea_text = Column(String, nullable=False)
+    target_customer = Column(String, nullable=True)
+    requested_action = Column(String, nullable=True)
+    mode = Column(String, nullable=False, default="demo")
+    error = Column(String, nullable=True)  # set only if the background graph run raised
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class DecisionMemo(Base):
     __tablename__ = "decision_memos"
     memo_id = Column(String, primary_key=True, default=lambda: new_id("memo"))

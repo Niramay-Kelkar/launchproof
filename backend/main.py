@@ -4,7 +4,13 @@ os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 
 import hashlib
 import json
+import logging
 from pathlib import Path
+
+# Without this, logger.info() calls (including the structured run/Masky logs
+# in api_runs.py and masky_adapter.py) are silently dropped -- the root
+# logger's default level is WARNING and nothing else configures a handler.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import HTMLResponse
@@ -19,6 +25,7 @@ from database import Base, engine, get_db
 from state_machine import transition, InvalidTransitionError
 from research_adapter import run_research
 from launchproof_routes import router as launchproof_router
+from api_runs import router as api_runs_router, webhook_router as masky_webhook_router
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -27,6 +34,8 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="LaunchProof API")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 app.include_router(launchproof_router)
+app.include_router(api_runs_router)
+app.include_router(masky_webhook_router)
 
 # Same-origin serving (via the /app mount below) needs no CORS at all.
 # This stays on only so the mockup can also be opened from a different

@@ -170,6 +170,156 @@ no migration tooling (`Base.metadata.create_all` only creates missing
 tables, not missing columns on existing ones). Adding persisted
 provider/charge provenance is a schema change for later, not done here.
 
+## Masky.AI integration (`/api/runs`)
+
+Avery (Masky's COO persona) starts and polls a validation run through two
+endpoints, built on top of the already-automated LangGraph package in
+`launchproof/` (its `Runner`, normally reachable directly at `/graph-runs/*`)
+rather than the manual `/runs/*` flow documented above.
+
+**Why `launchproof/` and not `/runs/*`:** `/runs/*`'s status vocabulary
+(`QA_RUNNING`, `PUBLISHING`, `MEASURING`, ...) matches a hackathon brief's
+expectations more closely by name, but no code anywhere drives those
+transitions automatically yet (`state_machine.py` defines them as valid, but
+nothing calls `set_status(..., "QA_RUNNING")` etc.) — a human would have to
+hand-author an `ExperimentSpecCreate` payload and manually operate every
+step. `launchproof/`'s graph *does* run research → experiment → asset →
+report automatically, pausing only at 4 founder-approval gates — it's the
+only workflow in this repo that's actually wired end-to-end today.
+
+**The honesty trade-off this implies:** `launchproof/`'s `ValidationReport`
+is permanently simulated by design (`schemas.py`: `evidence_status:
+"insufficient"`, `demand_established: False`, `real_customer_responses: 0`
+— no real landing-page traffic is ever involved). So `GET /api/runs/{id}`
+never returns real `visitors`/`signups`/`conversion_rate` — `metrics` is
+always `null`, and `limitations` always says plainly that this used the
+demo-mode simulated pipeline. A `"decision_ready"`/`"PROCEED"` result here
+means "this concept is ready for a real experiment," never "demand is
+proven." Statuses your brief lists that this graph has no equivalent
+step for (`qa_running`, `qa_passed`, `publishing`, `published`, `measuring`)
+are never returned — see `_UNSUPPORTED_BY_THIS_IMPLEMENTATION` in
+`api_runs.py`.
+
+### Endpoints
+
+`POST /api/runs`
+
+```json
+{
+  "idea_text": "An AI career assistant for international graduate students",
+  "target_customer": "International graduate students",
+  "requested_action": "Validate this startup idea"
+}
+```
+→ `{"run_id": "lp_...", "status": "researching", "message": "Validation run started"}`
+
+Validates `idea_text` (10–3000 chars, required), generates a unique `run_id`,
+persists a `MaskyRun` row, and starts the graph in a FastAPI background task
+— the request returns immediately. Send an `Idempotency-Key` header to make
+retries safe: a repeated key returns the original `run_id` instead of
+starting a second run.
+
+`GET /api/runs/{run_id}` → current status, translated from the graph's real
+state (`waiting_for_founder` + gate → `researched`/`experiment_proposed`/
+`asset_built`/`approval_required`; `completed` → `decision_ready` or
+`inconclusive`; `cancelled`/`revision_limit_reached` → `inconclusive`; a
+background-task exception → `failed`). 404 if the run_id doesn't exist.
+
+Founder approval at each of the 4 gates (needed before a run can reach
+`decision_ready`) still goes through the existing `/graph-runs/{run_id}/
+resume` endpoint — Masky only starts and reads runs, per "do not allow
+publishing ... without a future approval gateway."
+
+### Masky adapter (`masky_adapter.py`)
+
+Masky is the *caller* of the two endpoints above, so no outbound Masky API
+calls are required for the core flow. The adapter module exists for the
+optional reverse direction — best-effort notifying Avery when a run reaches
+`decision_ready`/`inconclusive`, instead of making Avery poll forever — plus
+an inbound webhook receiver in case Masky ever pushes events to this backend.
+
+```bash
+MASKY_API_KEY=
+MASKY_AVATAR_ID=
+MASKY_WEBHOOK_SECRET=
+MASKY_API_BASE_URL=https://api.masky.ai   # placeholder, unverified
+PUBLIC_API_URL=                           # documentation only; not read by the app
+```
+
+- **No real Masky API contract was given or found**, so `RealMaskyProvider`
+  is an interface-shaped best guess (endpoint path, payload shape), not a
+  verified integration. It is never selected unless `MASKY_API_KEY` and
+  `MASKY_AVATAR_ID` are both set.
+- **`MockMaskyProvider` is the default** (and the only one actually
+  exercised by the test suite): it logs what it would have sent and makes
+  no network call. Every structured log line's `provider` field says
+  `"mock"` or `"real_unverified"` so this is never ambiguous from the logs.
+- `POST /webhooks/masky` verifies an inbound `X-Masky-Signature:
+  sha256=<hex hmac>` against `MASKY_WEBHOOK_SECRET` and rejects (401) if it's
+  missing, wrong, or the secret isn't configured. It logs and acknowledges
+  receipt only — it does not act on the payload, since Masky's real webhook
+  shape has not been confirmed.
+
+### Logging
+
+Every run/Masky action logs one JSON line via `masky_adapter.log_event()`:
+`run_creation`, `workflow_start`, `agent_completion`, `workflow_failure`,
+`final_recommendation`, `masky_notify_result`, `masky_webhook_received` —
+each as `{"run_id", "source": "masky", "action", "timestamp", "status",
+"provider", "error"}`. `main.py` calls `logging.basicConfig(level=INFO)` at
+import time; without it these are silently dropped (Python's root logger
+defaults to WARNING).
+
+### Sample session
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/runs \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: demo-key-1" \
+  -d '{"idea_text": "An AI career assistant for international graduate students",
+       "target_customer": "International graduate students",
+       "requested_action": "Validate this startup idea"}'
+# {"run_id":"lp_0ebd3b5fa156","status":"researching","message":"Validation run started"}
+
+curl http://127.0.0.1:8000/api/runs/lp_0ebd3b5fa156
+# {"run_id":"lp_0ebd3b5fa156","metrics":null,"evidence_type":null,"limitations":[],
+#  "next_test":null,"recommendation":null,"summary":null,"status":"researched","gate":"research"}
+```
+(Output above is from an actual local run of this code, not hand-written.)
+
+### Deploying for a real Masky configuration
+
+Not done as part of this change — provisioning a host needs your own
+account/billing decision. To deploy:
+
+1. Pick a host that runs a long-lived container/process (Masky needs to
+   reach a stable HTTPS URL): Render, Fly.io, or Railway are the simplest
+   fits for a single `uvicorn` process + SQLite file.
+2. Set `MASKY_API_KEY`, `MASKY_AVATAR_ID`, `MASKY_WEBHOOK_SECRET` as that
+   host's secret/environment config — never commit them to `.env` (gitignored
+   already) or anywhere in the repo.
+3. Run `uvicorn main:app --host 0.0.0.0 --port $PORT` as the start command.
+4. Give Masky's configuration the deployed base URL (also set locally as
+   `PUBLIC_API_URL` for your own reference) plus `/api/runs` as the path to
+   start a run and `/api/runs/{run_id}` to poll it.
+
+### Known limitations
+
+- `metrics`/`evidence_type: "real_participant_activity"` are never produced
+  by this implementation — see the honesty trade-off above. Getting real
+  visitor/signup numbers into this endpoint means wiring `/runs/*`'s
+  landing-page+events pipeline instead, which itself needs the
+  asset-build/QA/publish/measure automation that `state_machine.py` defines
+  but no code implements yet.
+- Mode is hardcoded to `"demo"` in `api_runs.py`; `"live"` mode (real
+  OpenAI calls via `langchain-openai`) is not wired through the Masky
+  adapter.
+- `RealMaskyProvider` is unverified against Masky's actual API — treat it as
+  a stub, not a working integration, until it's smoke-tested for real.
+- The 4 founder-approval gates still require a human to call
+  `/graph-runs/{run_id}/resume` directly; there is no Masky-facing approval
+  path (by design — see the approval-gateway requirement above).
+
 ## Things to hand to A and C immediately
 
 - `schemas.py` and `models.py` are the actual data contracts — don't let anyone guess field names
