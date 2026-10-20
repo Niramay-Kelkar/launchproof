@@ -103,6 +103,36 @@ Two behaviors worth knowing when you extend it:
   the merged LangGraph package in `launchproof/`) stays an honestly-labeled
   mock or an additive `/graph-runs/*` path, not part of `/runs/*`
 
+## Not yet wired: QA, publish, and decision-memo steps
+
+These exist in the schema/state machine only — no route in `main.py` ever
+reaches or produces them, and we are **not** implementing them before the
+demo. Don't assume they work; don't demo past `APPROVAL_REQUIRED` on the
+`/runs/*` path expecting any of this to fire.
+
+- **States** (`state_machine.py`): `QA_RUNNING`, `QA_PASSED`,
+  `APPROVAL_REQUIRED_PUBLISH`, `PUBLISHING`, `PUBLISHED`, `MEASURING`,
+  `DECISION_READY` are all valid *transitions* in `ALLOWED_TRANSITIONS`, but
+  no route handler ever calls `set_status(db, run, ...)` with any of them.
+  A run created via `/runs` cannot currently progress past
+  `APPROVAL_REQUIRED` (or `ASSET_BUILT`, if someone manually sets that) on
+  its own — someone would have to implement an asset-build step, a QA
+  simulator, an auto-publish step, and a measurement window first.
+  (`main.py`'s `landing_page()` does check `run.status` against a set
+  containing several of these names, but checking membership is not the
+  same as producing them — nothing ever sets a run's status to
+  `"QA_RUNNING"` etc. in the first place.)
+- **Tables** (`models.py`): `ActionReceipt` and `DecisionMemo` are defined
+  (including `ActionReceipt.idempotency_key`, which looks ready for exactly
+  this kind of use) but neither is ever queried, inserted into, or
+  referenced by any route in `main.py` or `launchproof_routes.py`. They are
+  schema only.
+
+This doesn't affect `launchproof/`'s separate LangGraph workflow (`/graph-runs/*`,
+also wired to Masky via `/api/runs` — see below), which has its own
+automatic research → experiment → asset → report pipeline unrelated to this
+state machine.
+
 ## Glasser: the one real sponsor integration
 
 `real_research()` in `research_adapter.py` builds its evidence from HTTPS
