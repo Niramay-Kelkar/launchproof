@@ -29,6 +29,22 @@ on some synced/networked folder (Dropbox, some sandboxed VMs), point `DATABASE_U
 in `.env` at a local path instead, e.g. `sqlite:////tmp/launchproof.db` — it's a
 filesystem locking quirk, not an app bug.
 
+## Run the tests
+
+From the **repo root** (not from `backend/`):
+
+```bash
+pytest
+```
+
+This runs both suites in one command — `backend/tests/` (the FastAPI app,
+research adapter, Glasser client, Masky adapter) and `backend/launchproof/tests/`
+(the LangGraph package's own tests) — via the repo-root `pytest.ini`'s
+`pythonpath = backend`, which puts `backend/` on `sys.path` for the whole
+session so `backend/tests/`'s direct imports (`import glasser_client`,
+`import research_adapter`, `from launchproof.network import ...`) resolve
+the same way they do when the app itself runs. Expect `75 passed`.
+
 ### Local TLS trust store (only if real_research() can't fetch anything)
 
 If `RESEARCH_PROVIDER_IS_REAL=true` and every fetch fails with
